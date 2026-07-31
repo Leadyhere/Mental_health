@@ -20,6 +20,7 @@ interface UseChatSocketResult {
   connected: boolean;
   sendText: (text: string) => void;
   sendChip: (value: string) => void;
+  sendDoneSharing: () => void;
 }
 
 let entryCounter = 0;
@@ -99,5 +100,9 @@ export function useChatSocket(sessionId: string, token: string): UseChatSocketRe
     [send]
   );
 
-  return { entries, phase, pendingQuestion, crisisBanner, reportReady, connected, sendText, sendChip };
+  const sendDoneSharing = useCallback(() => {
+    send({ type: "done_sharing", payload: { done_sharing: true } });
+  }, [send]);
+
+  return { entries, phase, pendingQuestion, crisisBanner, reportReady, connected, sendText, sendChip, sendDoneSharing };
 }

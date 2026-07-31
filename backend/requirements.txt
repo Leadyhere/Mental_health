@@ -11,7 +11,7 @@ openai
 python-jose[cryptography]
 passlib
 python-multipart
-fpdf2
+reportlab
 torch==2.12.1
 pandas
 pyarrow

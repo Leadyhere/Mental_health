@@ -40,8 +40,25 @@ async def get_report(session_id: str, format: str | None = None):
     report = build_report(state)
     if format == "pdf":
         pdf_bytes = build_report_pdf(report)
-        return Response(content=pdf_bytes, media_type="application/pdf")
+        return Response(content=pdf_bytes, media_type="application/pdf", headers={"Content-Disposition": f"attachment; filename=report_{session_id}.pdf"})
     return report
+
+
+@router.get("/{session_id}/pdf")
+async def get_report_pdf_direct(session_id: str):
+    state = await get_session_store().get(session_id)
+    if state is None:
+        raise HTTPException(status_code=404, detail="session not found or already ended")
+    if state.current_risk_assessment is None:
+        raise HTTPException(status_code=409, detail="session has not reached a risk assessment yet")
+
+    report = build_report(state)
+    pdf_bytes = build_report_pdf(report)
+    return Response(
+        content=pdf_bytes,
+        media_type="application/pdf",
+        headers={"Content-Disposition": f"attachment; filename=report_{session_id}.pdf"},
+    )
 
 
 @router.post("/{session_id}/end")

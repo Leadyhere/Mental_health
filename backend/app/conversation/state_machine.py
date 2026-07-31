@@ -6,21 +6,55 @@ from __future__ import annotations
 
 from app.conversation import narrative_phase, question_selector
 from app.conversation.emergency_gate import evaluate_emergency
-from app.conversation.narrative_analysis import analyze_narrative
 from app.conversation.narrative_phase import NarrativeAction
 from app.conversation.question_bank import QUESTION_BANK
 from app.crisis_resources import CRISIS_RESOURCES, EMERGENCY_MESSAGE
 from app.llm.classifier import classify_risk
+from app.llm.client import complete_json
+from app.llm.prompts.loader import render
 from app.llm.safety_filter import apply_confidence_escalation, filter_outbound_message
 from app.models.schemas import (
     ClientMessage,
     ConversationPhase,
+    NarrativeAnalysis,
     RiskAssessment,
     ServerMessage,
     StructuredAnswer,
     SubLabels,
     Utterance,
 )
+from app.nlp_engine import NLPEngine
+
+_EMPTY_ANSWERED = {
+    "emotional_clarification": False,
+    "coping_behaviors": False,
+    "support_person": False,
+    "distress_intensity": False,
+    "feels_safe": False,
+    "meaning_readiness": False,
+    "open_to_support": False,
+}
+
+
+async def _analyze_narrative(narrative_text: str, turns: list[str]) -> tuple[NarrativeAnalysis, dict | None]:
+    system = render("narrative_analysis", narrative_text=narrative_text)
+    try:
+        data = await complete_json(system=system, user="Analyze this narrative.")
+        analysis = NarrativeAnalysis(
+            key_events=data.get("key_events", []),
+            timeline=data.get("timeline"),
+            emotions=data.get("emotions", []),
+            coping_signals=data.get("coping_signals", []),
+            support_signals=data.get("support_signals", []),
+            functional_impact=data.get("functional_impact"),
+            risk_language_flags=data.get("risk_language_flags", []),
+            answered_questions=data.get("answered_questions", dict(_EMPTY_ANSWERED)),
+        )
+        NLPEngine.log_teacher_pair(narrative_text, data)
+        return analysis, None
+    except Exception:
+        analysis = NarrativeAnalysis(answered_questions=dict(_EMPTY_ANSWERED))
+        return analysis, None
 
 
 def _extract_text(message: ClientMessage) -> str:
@@ -79,10 +113,6 @@ async def _finalize_session(state) -> list[ServerMessage]:
     assessment, llm_says_emergency = await classify_risk(session_context)
     assessment = apply_confidence_escalation(assessment)
 
-    # Escalation can itself push the level to Emergency (e.g. an unparseable/
-    # failed LLM call falls back to Severe at 0.0 confidence, which then
-    # escalates one level) -- that must route through the same hard gate as
-    # an explicit LLM/hardcoded Emergency signal, never just get reported.
     if (
         llm_says_emergency
         or assessment.risk_level == "Emergency"
@@ -106,8 +136,16 @@ async def handle_client_message(state, message: ClientMessage) -> list[ServerMes
     if state.phase in (ConversationPhase.closing, ConversationPhase.emergency):
         return []
 
+    is_explicit_done = (message.type == "done_sharing") or bool(message.payload.get("done_sharing"))
     user_text = _extract_text(message)
-    state.utterances.append(Utterance(turn_id=_next_turn_id(state), role="user", text=user_text))
+    if user_text:
+        state.utterances.append(Utterance(turn_id=_next_turn_id(state), role="user", text=user_text))
+
+    # 2-Tier Crisis Pre-check across all phases
+    if user_text:
+        is_crisis, _rationale = NLPEngine.check_crisis_override(user_text)
+        if is_crisis:
+            return await _trigger_emergency(state)
 
     if state.phase == ConversationPhase.narrative:
         num_narrative_turns = sum(1 for u in state.utterances if u.role == "user")
@@ -115,6 +153,7 @@ async def handle_client_message(state, message: ClientMessage) -> list[ServerMes
             user_text,
             has_prior_substantive_turn=num_narrative_turns > 1,
             completion_check_already_asked=state.narrative_completion_check_asked,
+            explicit_done=is_explicit_done,
         )
 
         if result.action == NarrativeAction.emergency:
@@ -131,11 +170,10 @@ async def handle_client_message(state, message: ClientMessage) -> list[ServerMes
 
         # move_to_analysis
         narrative_text = "\n".join(u.text for u in state.utterances if u.role == "user")
-        analysis, _inhouse_signal = await analyze_narrative(narrative_text, turns=[u.text for u in state.utterances if u.role == "user"])
+        analysis, _inhouse_signal = await _analyze_narrative(narrative_text, turns=[u.text for u in state.utterances if u.role == "user"])
         state.narrative_analysis = analysis
         state.phase = ConversationPhase.structured
 
-        from app.llm.client import complete
         from app.llm.prompts.loader import render
         transition_text = render("transition_to_structured")
 
@@ -155,6 +193,10 @@ async def handle_client_message(state, message: ClientMessage) -> list[ServerMes
     if state.phase == ConversationPhase.structured:
         question = next((q for q in QUESTION_BANK if q.id == state.pending_question_id), None)
         if question is not None:
+            # Free-text clinical slot extraction
+            if user_text:
+                extracted_slots = NLPEngine.extract_clinical_slots(user_text)
+
             answer = StructuredAnswer(
                 question_id=question.id,
                 question_text=question.prompt,

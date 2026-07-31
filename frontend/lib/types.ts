@@ -5,7 +5,7 @@ export type ServerMessageType =
   | "crisis_banner"
   | "report_ready";
 
-export type ClientMessageType = "user_text" | "chip_select" | "request_status";
+export type ClientMessageType = "user_text" | "chip_select" | "request_status" | "done_sharing";
 
 export interface ServerMessage {
   type: ServerMessageType;

@@ -114,7 +114,7 @@ class TrainingTriple(BaseModel):
 # --- WebSocket wire messages ---
 
 class ClientMessage(BaseModel):
-    type: Literal["user_text", "chip_select", "request_status"]
+    type: Literal["user_text", "chip_select", "request_status", "done_sharing"]
     payload: dict[str, Any] = Field(default_factory=dict)
 
 

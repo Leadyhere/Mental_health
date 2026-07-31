@@ -31,17 +31,28 @@ class NuanceEncoder(nn.Module):
         attention_dim: int = config.ATTENTION_DIM,
         dropout: float = config.DROPOUT,
         pad_idx: int = 0,
+        nhead: int = 4,
+        num_layers: int = 2,
     ):
         super().__init__()
         self.embedding = nn.Embedding(vocab_size, embed_dim, padding_idx=pad_idx)
         self.pad_idx = pad_idx
         self.dropout = nn.Dropout(dropout)
-        self.gru = nn.GRU(embed_dim, hidden_dim, batch_first=True, bidirectional=True)
-        self.attn_proj = nn.Linear(hidden_dim * 2, attention_dim)
+
+        encoder_layer = nn.TransformerEncoderLayer(
+            d_model=embed_dim,
+            nhead=nhead,
+            dim_feedforward=hidden_dim,
+            dropout=dropout,
+            batch_first=True,
+        )
+        self.transformer_encoder = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
+
+        self.attn_proj = nn.Linear(embed_dim, attention_dim)
         self.attn_context = nn.Linear(attention_dim, 1, bias=False)
+        self._output_dim = embed_dim
 
     def _pool_turns(self, turn_ids: torch.Tensor) -> torch.Tensor:
-        # turn_ids: (batch, num_turns, max_tokens) -> (batch, num_turns, embed_dim)
         embedded = self.embedding(turn_ids)
         token_mask = (turn_ids != self.pad_idx).float().unsqueeze(-1)
         summed = (embedded * token_mask).sum(dim=2)
@@ -50,17 +61,22 @@ class NuanceEncoder(nn.Module):
 
     def forward(self, turn_ids: torch.Tensor, turn_mask: torch.Tensor | None = None):
         turn_vectors = self.dropout(self._pool_turns(turn_ids))
-        gru_out, _ = self.gru(turn_vectors)  # (batch, num_turns, hidden*2)
 
-        energy = torch.tanh(self.attn_proj(gru_out))
-        scores = self.attn_context(energy).squeeze(-1)  # (batch, num_turns)
+        if turn_mask is not None:
+            key_padding_mask = (turn_mask == 0)
+            encoded = self.transformer_encoder(turn_vectors, src_key_padding_mask=key_padding_mask)
+        else:
+            encoded = self.transformer_encoder(turn_vectors)
+
+        energy = torch.tanh(self.attn_proj(encoded))
+        scores = self.attn_context(energy).squeeze(-1)
         if turn_mask is not None:
             scores = scores.masked_fill(turn_mask == 0, float("-inf"))
-        weights = torch.softmax(scores, dim=1).unsqueeze(-1)  # (batch, num_turns, 1)
-        summary_vector = (weights * gru_out).sum(dim=1)  # (batch, hidden*2)
+        weights = torch.softmax(scores, dim=1).unsqueeze(-1)
+        summary_vector = (weights * encoded).sum(dim=1)
 
-        return gru_out, summary_vector
+        return encoded, summary_vector
 
     @property
     def output_dim(self) -> int:
-        return self.gru.hidden_size * 2
+        return self._output_dim
