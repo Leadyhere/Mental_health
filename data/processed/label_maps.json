@@ -1,0 +1,44 @@
+{
+  "risk_level": [
+    "N/A-Feeling Fine",
+    "Low",
+    "Mild",
+    "Moderate",
+    "Severe",
+    "Emergency"
+  ],
+  "suicide_risk": [
+    "No",
+    "Yes and it feels risky right now",
+    "Yes but wouldn't act"
+  ],
+  "functional_impairment": [
+    "marked",
+    "none",
+    "some"
+  ],
+  "support_level": [
+    "isolated",
+    "mixed",
+    "supported",
+    "unknown"
+  ],
+  "help_readiness": [
+    "I'm open to suggestions",
+    "Maybe later",
+    "N/A",
+    "Not right now",
+    "Yes, I want help"
+  ],
+  "q9_options_live": [
+    "No",
+    "Occasionally",
+    "Often",
+    "prefer not to answer"
+  ],
+  "q10_options_live": [
+    "No",
+    "Yes but wouldn't act",
+    "Yes and it feels risky right now"
+  ]
+}

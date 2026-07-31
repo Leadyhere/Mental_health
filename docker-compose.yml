@@ -1,0 +1,46 @@
+# Stub only -- not run this phase. Deployment is deferred per the build
+# plan; local dev uses fakeredis + SQLite (see backend/app/services/
+# session_store.py and backend/app/models/db.py). Swapping in real Redis/
+# Postgres here later only requires updating REDIS_URL/DATABASE_URL in
+# .env -- no application code changes needed.
+services:
+  backend:
+    build: ./backend
+    ports:
+      - "8000:8000"
+    environment:
+      - GROK_API_KEY=${GROK_API_KEY}
+      - REDIS_URL=redis://redis:6379/0
+      - DATABASE_URL=postgresql+asyncpg://triage:triage@postgres:5432/triage
+    depends_on:
+      - redis
+      - postgres
+
+  frontend:
+    build: ./frontend
+    ports:
+      - "3000:3000"
+    environment:
+      - NEXT_PUBLIC_API_BASE=http://localhost:8000
+      - NEXT_PUBLIC_WS_BASE=ws://localhost:8000
+    depends_on:
+      - backend
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      - POSTGRES_USER=triage
+      - POSTGRES_PASSWORD=triage
+      - POSTGRES_DB=triage
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+volumes:
+  postgres_data:
