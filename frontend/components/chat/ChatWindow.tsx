@@ -40,7 +40,7 @@ export function ChatWindow({
       <div className="flex items-center justify-between px-4 py-2 bg-gray-50 dark:bg-gray-900 border-b border-gray-200 dark:border-gray-800 text-xs text-gray-500">
         <div className="flex items-center gap-2">
           <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
-          <span>Encrypted Session</span>
+          <span>Session Active</span>
         </div>
         <div className="flex items-center gap-2">
           {onLockTrigger && (
