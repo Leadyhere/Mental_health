@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>MindTriage</title>
+  <style>
+    :root{--bg:#08111f;--panel:#111d30;--panel2:#17253a;--text:#eef5ff;--muted:#9fb0c8;--line:#2b3c55;--blue:#66c7ff;--green:#5ce0a8;--orange:#ffb260;--red:#ff758d}
+    *{box-sizing:border-box}body{margin:0;background:radial-gradient(circle at top,#142642,var(--bg) 48%);color:var(--text);font:15px/1.55 Inter,system-ui,sans-serif;height:100vh;display:flex;flex-direction:column}
+    header{display:flex;align-items:center;justify-content:space-between;gap:16px;padding:15px 22px;background:#0c1727e8;border-bottom:1px solid var(--line)}
+    h1{font-size:19px;margin:0}.sub{font-size:12px;color:var(--muted)}.actions{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+    button{border:0;border-radius:9px;padding:9px 13px;background:#2675bc;color:white;font-weight:650;cursor:pointer}button.secondary{background:#31425a}button:disabled{opacity:.5;cursor:not-allowed}
+    #risk{font-size:12px;border:1px solid #386654;background:#173b32;color:var(--green);padding:7px 10px;border-radius:9px}
+    main{width:min(900px,100%);margin:auto;min-height:0;flex:1;padding:18px;display:flex;flex-direction:column}
+    #chat{flex:1;overflow:auto;display:flex;flex-direction:column;gap:14px;padding:4px}
+    .row{max-width:80%;display:flex;flex-direction:column;gap:4px}.row.user{align-self:flex-end}.row.bot{align-self:flex-start}.label{font-size:11px;color:var(--muted)}
+    .bubble{padding:13px 15px;border-radius:15px;background:var(--panel2);border:1px solid var(--line);white-space:pre-wrap}.user .bubble{background:#2167aa;border-color:#3a83c4}
+    .emergency{max-width:100%;background:#401a25;border:1px solid #843347;color:#ffdce3;padding:14px;border-radius:12px;white-space:pre-wrap}
+    .composer{display:flex;gap:9px;margin-top:14px;background:var(--panel);border:1px solid var(--line);padding:9px;border-radius:12px}
+    textarea{flex:1;resize:none;max-height:120px;background:transparent;border:0;outline:0;color:var(--text);font:inherit;padding:7px}
+    .privacy{display:flex;justify-content:space-between;gap:12px;color:var(--muted);font-size:12px;padding:9px 3px}.privacy label{display:flex;gap:7px;align-items:center}
+    dialog{width:min(680px,92vw);color:var(--text);background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:22px}dialog::backdrop{background:#040a13cc}.report{white-space:pre-wrap;background:var(--bg);padding:14px;border-radius:9px;color:#d8e4f5;max-height:60vh;overflow:auto}.modal-actions{display:flex;justify-content:flex-end;gap:8px;margin-top:14px}
+    @media(max-width:700px){header{align-items:flex-start;flex-direction:column}.row{max-width:92%}.privacy{flex-direction:column}.actions{width:100%}}
+  </style>
+</head>
+<body>
+  <header>
+    <div><h1>MindTriage</h1><div class="sub">Private, non-diagnostic conversational support</div></div>
+    <div class="actions"><span id="risk">Level 1 - Low (Watchful)</span><button onclick="showSummary()">Summary</button><button class="secondary" onclick="endSession()">End session</button></div>
+  </header>
+  <main>
+    <section id="chat" aria-live="polite">
+      <div class="row bot"><div class="label">MindTriage Assistant</div><div class="bubble">Hello. I’m here to listen and help you organize what has been weighing on you. I’m not a therapist or emergency service, and you may stop at any time. What made you reach out today?</div></div>
+    </section>
+    <div class="composer"><textarea id="input" rows="1" maxlength="4000" placeholder="Write what is on your mind..."></textarea><button id="send" onclick="sendMessage()">Send</button></div>
+    <div class="privacy"><label><input id="consent" type="checkbox"> Use this redacted conversation for model training</label><span>Optional and off by default</span></div>
+  </main>
+  <dialog id="summary"><h2>Conversation summary</h2><div id="report" class="report">Loading…</div><div class="modal-actions"><button onclick="downloadReport()">Download</button><button class="secondary" onclick="document.getElementById('summary').close()">Close</button></div></dialog>
+  <script>
+    let sessionId=null,reportText="",busy=false;
+    async function request(url,options={}){const response=await fetch(url,options);if(!response.ok){let detail="Request failed";try{detail=(await response.json()).detail||detail}catch{}throw new Error(detail)}return response.json()}
+    async function startSession(){if(sessionId)return sessionId;const consent=document.getElementById("consent");const data=await request("/chat/start",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({training_consent:consent.checked,locale:navigator.language||"en-IN"})});sessionId=data.session_id;consent.disabled=true;return sessionId}
+    function addMessage(text,role){const chat=document.getElementById("chat"),row=document.createElement("div"),label=document.createElement("div"),bubble=document.createElement("div");row.className=`row ${role}`;label.className="label";label.textContent=role==="user"?"You":"MindTriage Assistant";bubble.className="bubble";bubble.textContent=text;row.append(label,bubble);chat.append(row);chat.scrollTop=chat.scrollHeight}
+    function addEmergency(contacts){const banner=document.createElement("div");banner.className="emergency";banner.textContent="Immediate safety notice\n\n"+Object.entries(contacts).map(([name,number])=>`${name}: ${number}`).join("\n");document.getElementById("chat").append(banner)}
+    function setRisk(level){const badge=document.getElementById("risk");badge.textContent=level;const severe=level.includes("Level 5"),priority=level.includes("Level 4")||level.includes("Level 3");badge.style.color=severe?"var(--red)":priority?"var(--orange)":"var(--green)"}
+    async function sendMessage(){if(busy)return;const input=document.getElementById("input"),text=input.value.trim();if(!text)return;busy=true;document.getElementById("send").disabled=true;input.value="";addMessage(text,"user");try{await startSession();const data=await request("/chat/message",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({session_id:sessionId,user_input:text})});setRisk(data.highest_risk_level);if(data.is_emergency)addEmergency(data.emergency_contacts);addMessage(data.bot_reply,"bot")}catch(error){addMessage(`Unable to send: ${error.message}`,"bot")}finally{busy=false;document.getElementById("send").disabled=false;input.focus()}}
+    async function showSummary(){if(!sessionId){alert("Start a conversation first.");return}const dialog=document.getElementById("summary");dialog.showModal();document.getElementById("report").textContent="Loading…";try{const data=await request(`/chat/summary?session_id=${encodeURIComponent(sessionId)}`);reportText=data.report;document.getElementById("report").textContent=reportText}catch(error){document.getElementById("report").textContent=error.message}}
+    function downloadReport(){if(!reportText)return;const link=document.createElement("a");link.href=URL.createObjectURL(new Blob([reportText],{type:"text/plain"}));link.download="MindTriage-summary.txt";link.click();URL.revokeObjectURL(link.href)}
+    async function endSession(){if(!sessionId)return;const old=sessionId;sessionId=null;try{await request("/chat/end",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({session_id:old}),keepalive:true})}catch{}document.getElementById("consent").disabled=false;setRisk("Level 1 - Low (Watchful)");addMessage("Your temporary session has ended and active conversation data was deleted.","bot")}
+    document.getElementById("input").addEventListener("keydown",event=>{if(event.key==="Enter"&&!event.shiftKey){event.preventDefault();sendMessage()}});
+    window.addEventListener("pagehide",()=>{if(sessionId)fetch("/chat/end",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({session_id:sessionId}),keepalive:true})});
+  </script>
+</body>
+</html>

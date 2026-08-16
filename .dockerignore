@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+.env
+.git/
+outputs/
+models/
+data/
+*.xlsx
+*.xls
+*.log
+conversations.json
+runs/

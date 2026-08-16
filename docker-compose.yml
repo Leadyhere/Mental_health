@@ -1,0 +1,51 @@
+services:
+  api:
+    build: .
+    environment:
+      APP_ENV: ${APP_ENV:-development}
+      GROQ_API_KEY: ${GROQ_API_KEY:-}
+      GROQ_MODEL: ${GROQ_MODEL:-llama-3.3-70b-versatile}
+      LOCAL_MODEL_DIR: /app/models/inhouse_risk_classifier
+      LOCAL_NLP_MODEL_DIR: /app/models/inhouse_nlp
+      ENABLE_LOCAL_DIALOGUE_MODEL: ${ENABLE_LOCAL_DIALOGUE_MODEL:-false}
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      DATABASE_URL: postgresql://mindtriage:mindtriage-development-only@postgres:5432/mindtriage
+      ANALYTICS_HASH_SECRET: ${ANALYTICS_HASH_SECRET:-development-only-change-me}
+      CONVERSATIONS_LOG_PATH: /app/data/conversations.jsonl
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./data:/app/data
+      - ./models:/app/models
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: mindtriage
+      POSTGRES_USER: mindtriage
+      POSTGRES_PASSWORD: mindtriage-development-only
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U mindtriage -d mindtriage"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    command: redis-server --save "" --appendonly no
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  postgres_data:

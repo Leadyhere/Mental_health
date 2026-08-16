@@ -1,0 +1,30 @@
+# Secrets and local configuration
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Private/user-derived datasets and generated conversations
+data/
+outputs/
+*.xlsx
+*.xls
+conversations.json
+
+# Trained weights, caches and experiment output
+models/
+runs/
+logs/
+*.log
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.cache/
+
+# Local dependencies and editor/system files
+scripts/node_modules/
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
