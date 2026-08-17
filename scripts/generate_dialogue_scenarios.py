@@ -7,6 +7,7 @@ import random
 import sys
 import tempfile
 import uuid
+from collections import Counter
 from pathlib import Path
 
 from fastapi.testclient import TestClient
@@ -78,6 +79,10 @@ def generate(args):
         )
         client = TestClient(create_app(settings))
         records = []
+        # ``expected_risk`` is a scenario-card target, not a clinical label.  The
+        # label that conditions dialogue training must be the risk produced by the
+        # same NLP + MentalBERT + safety pipeline used at runtime.
+        risk_mismatches = []
         for scenario_index, (expected_risk, turns) in zip(
             range(args.conversations), scenario_stream(args.seed)
         ):
@@ -92,13 +97,23 @@ def generate(args):
                 )
                 response.raise_for_status()
                 body = response.json()
+                turn_expected_risk = expected_risk if turn_number == len(turns) else None
+                if turn_expected_risk and turn_expected_risk not in body["risk_level"]:
+                    risk_mismatches.append(
+                        {
+                            "conversation": scenario_index,
+                            "turn": turn_number,
+                            "expected": turn_expected_risk,
+                            "observed": body["risk_level"],
+                        }
+                    )
                 records.append(
                     {
                         "schema_version": "2.0",
                         "data_origin": "groq_synthetic_scenario_replay",
                         "conversation_id": conversation_id,
                         "turn_number": turn_number,
-                        "expected_risk": expected_risk,
+                        "expected_risk": turn_expected_risk,
                         "observed_risk": body["risk_level"],
                         "user_text": user_text,
                         "assistant_text": body["bot_reply"],
@@ -112,11 +127,26 @@ def generate(args):
         "".join(json.dumps(record, ensure_ascii=False) + "\n" for record in records),
         encoding="utf-8",
     )
+    trainable_records = [
+        record
+        for record in records
+        if not record["conversation_model"].startswith("deterministic-safety")
+    ]
+    observed_distribution = Counter(
+        record["observed_risk"] for record in trainable_records
+    )
     summary = {
         "conversations": args.conversations,
         "turns": len(records),
+        "trainable_turns": len(trainable_records),
+        "scenario_risk_mismatches": len(risk_mismatches),
+        "observed_risk_distribution": dict(sorted(observed_distribution.items())),
         "output": str(output),
-        "note": "Synthetic data must be reviewed before training and kept separate from holdout safety tests.",
+        "note": (
+            "observed_risk is the runtime-pipeline label used by train_dialogue.py; "
+            "expected_risk is retained only to audit synthetic scenario cards. "
+            "Synthetic data must be reviewed before training and kept separate from holdout safety tests."
+        ),
     }
     print(json.dumps(summary, indent=2))
 

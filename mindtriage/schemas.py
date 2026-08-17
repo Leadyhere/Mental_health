@@ -15,6 +15,10 @@ class EndSessionRequest(BaseModel):
     session_id: str = Field(min_length=8, max_length=80)
 
 
+class SummaryRequest(BaseModel):
+    session_id: str = Field(min_length=8, max_length=80)
+
+
 class ChatResponse(BaseModel):
     session_id: str
     bot_reply: str

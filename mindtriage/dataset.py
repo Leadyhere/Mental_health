@@ -19,6 +19,16 @@ class ConsentedDatasetLogger:
         text = re.sub(r"https?://\S+", "[URL]", text)
         return text
 
+    @classmethod
+    def redact_value(cls, value):
+        if isinstance(value, str):
+            return cls.redact(value)
+        if isinstance(value, list):
+            return [cls.redact_value(item) for item in value]
+        if isinstance(value, dict):
+            return {key: cls.redact_value(item) for key, item in value.items()}
+        return value
+
     def log(
         self,
         conversation_id: str,
@@ -38,7 +48,7 @@ class ConsentedDatasetLogger:
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "user_text": self.redact(user_text),
             "assistant_text": self.redact(bot_reply),
-            "extracted_features": features,
+            "extracted_features": self.redact_value(features),
             "risk_level": risk_level,
             "target_slot": target_slot,
             "mi_policy": policy,

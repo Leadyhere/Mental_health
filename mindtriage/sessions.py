@@ -1,4 +1,5 @@
 import json
+import copy
 import threading
 import time
 import uuid
@@ -12,7 +13,7 @@ class SessionStore(Protocol):
 
     def create(self, training_consent: bool, locale: str) -> dict: ...
     def get(self, session_id: str) -> dict | None: ...
-    def save(self, session: dict) -> None: ...
+    def save(self, session: dict) -> bool: ...
     def delete(self, session_id: str) -> bool: ...
 
 
@@ -59,18 +60,24 @@ class MemorySessionStore:
         session = new_session(training_consent, locale, self.ttl_seconds)
         with self._lock:
             self._purge_expired()
-            self._sessions[session["session_id"]] = session
-        return session
+            self._sessions[session["session_id"]] = copy.deepcopy(session)
+        return copy.deepcopy(session)
 
     def get(self, session_id: str) -> dict | None:
         with self._lock:
             self._purge_expired()
-            return self._sessions.get(session_id)
+            session = self._sessions.get(session_id)
+            return copy.deepcopy(session) if session is not None else None
 
-    def save(self, session: dict) -> None:
+    def save(self, session: dict) -> bool:
         with self._lock:
-            session["expires_at"] = time.time() + self.ttl_seconds
-            self._sessions[session["session_id"]] = session
+            self._purge_expired()
+            if session["session_id"] not in self._sessions:
+                return False
+            stored = copy.deepcopy(session)
+            stored["expires_at"] = time.time() + self.ttl_seconds
+            self._sessions[stored["session_id"]] = stored
+            return True
 
     def delete(self, session_id: str) -> bool:
         with self._lock:
@@ -89,18 +96,31 @@ class RedisSessionStore:
 
     def create(self, training_consent: bool, locale: str) -> dict:
         session = new_session(training_consent, locale, self.ttl_seconds)
-        self.save(session)
+        self.client.setex(
+            self._key(session["session_id"]), self.ttl_seconds, json.dumps(session)
+        )
         return session
 
     def get(self, session_id: str) -> dict | None:
         value = self.client.get(self._key(session_id))
         return json.loads(value) if value else None
 
-    def save(self, session: dict) -> None:
+    def save(self, session: dict) -> bool:
         session["expires_at"] = time.time() + self.ttl_seconds
-        self.client.setex(
-            self._key(session["session_id"]), self.ttl_seconds, json.dumps(session)
+        result = self.client.eval(
+            """
+            if redis.call('EXISTS', KEYS[1]) == 1 then
+                redis.call('SETEX', KEYS[1], ARGV[1], ARGV[2])
+                return 1
+            end
+            return 0
+            """,
+            1,
+            self._key(session["session_id"]),
+            self.ttl_seconds,
+            json.dumps(session),
         )
+        return bool(result)
 
     def delete(self, session_id: str) -> bool:
         return bool(self.client.delete(self._key(session_id)))
@@ -122,5 +142,7 @@ def build_session_store(settings: Settings) -> SessionStore:
             client.ping()
             return RedisSessionStore(client, settings.session_ttl_seconds)
         except Exception as exc:
+            if settings.environment == "production":
+                raise RuntimeError("Redis is required and unavailable in production") from exc
             print(f"[WARNING] Redis unavailable; using process memory: {exc}")
     return MemorySessionStore(settings.session_ttl_seconds)
