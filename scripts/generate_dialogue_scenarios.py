@@ -6,6 +6,7 @@ import json
 import random
 import sys
 import tempfile
+import time
 import uuid
 from collections import Counter
 from pathlib import Path
@@ -54,6 +55,62 @@ RISK_TURNS = {
 }
 
 
+RETRYABLE_STATUS_CODES = {429, 500, 502, 503, 504}
+
+
+def post_message_with_retry(client, payload: dict, max_retries: int):
+    """Retry transient hosted-model failures without mutating a chat session."""
+    for attempt in range(max_retries + 1):
+        response = client.post("/chat/message", json=payload)
+        if response.status_code not in RETRYABLE_STATUS_CODES:
+            response.raise_for_status()
+            return response
+        if attempt == max_retries:
+            response.raise_for_status()
+        delay_seconds = min(60, 2 ** (attempt + 1))
+        print(
+            json.dumps(
+                {
+                    "event": "transient_generation_failure",
+                    "status": response.status_code,
+                    "retry": attempt + 1,
+                    "max_retries": max_retries,
+                    "retry_in_seconds": delay_seconds,
+                }
+            ),
+            flush=True,
+        )
+        time.sleep(delay_seconds)
+    raise RuntimeError("Unreachable retry state")
+
+
+def load_checkpoint(path: Path) -> tuple[list[dict], set[int]]:
+    if not path.exists():
+        return [], set()
+    records = [
+        json.loads(line)
+        for line in path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    grouped: dict[int, list[dict]] = {}
+    for record in records:
+        scenario_index = record.get("scenario_index")
+        if not isinstance(scenario_index, int):
+            raise ValueError(
+                f"Checkpoint {path} was created by an older generator and cannot be resumed. "
+                "Delete it and start again."
+            )
+        grouped.setdefault(scenario_index, []).append(record)
+    completed = {
+        index
+        for index, conversation_records in grouped.items()
+        if len(conversation_records) == len(RISK_TURNS) and {
+            record["turn_number"] for record in conversation_records
+        } == set(range(1, len(RISK_TURNS) + 1))
+    }
+    return records, completed
+
+
 def scenario_stream(seed: int):
     combinations = list(itertools.product(TOPICS, EMOTIONS, DURATIONS, IMPACTS, COPING, SUPPORT))
     random.Random(seed).shuffle(combinations)
@@ -66,8 +123,32 @@ def scenario_stream(seed: int):
 
 
 def generate(args):
+    if args.conversations <= 0:
+        raise ValueError("--conversations must be greater than zero")
+    if args.max_retries < 0:
+        raise ValueError("--max-retries cannot be negative")
+    if args.progress_every <= 0:
+        raise ValueError("--progress-every must be greater than zero")
     output = args.output.resolve()
     output.parent.mkdir(parents=True, exist_ok=True)
+    checkpoint = output.with_name(f"{output.name}.partial")
+    if checkpoint.exists() and not args.resume:
+        raise FileExistsError(
+            f"Checkpoint exists at {checkpoint}. Re-run with --resume to continue it, "
+            "or delete that checkpoint to start over."
+        )
+    records, completed_scenarios = load_checkpoint(checkpoint) if args.resume else ([], set())
+    if completed_scenarios:
+        print(
+            json.dumps(
+                {
+                    "event": "resuming_generation",
+                    "completed_conversations": len(completed_scenarios),
+                    "requested_conversations": args.conversations,
+                }
+            ),
+            flush=True,
+        )
     with tempfile.TemporaryDirectory() as temp_dir:
         temp = Path(temp_dir)
         settings = Settings(
@@ -78,7 +159,6 @@ def generate(args):
             dataset_path=temp / "unused.jsonl",
         )
         client = TestClient(create_app(settings))
-        records = []
         # ``expected_risk`` is a scenario-card target, not a clinical label.  The
         # label that conditions dialogue training must be the risk produced by the
         # same NLP + MentalBERT + safety pipeline used at runtime.
@@ -86,16 +166,19 @@ def generate(args):
         for scenario_index, (expected_risk, turns) in zip(
             range(args.conversations), scenario_stream(args.seed)
         ):
+            if scenario_index in completed_scenarios:
+                continue
             session = client.post(
                 "/chat/start", json={"training_consent": False, "locale": "en-IN"}
             ).json()
             conversation_id = f"synthetic_{args.seed}_{scenario_index}_{uuid.uuid4().hex[:8]}"
+            conversation_records = []
             for turn_number, user_text in enumerate(turns, start=1):
-                response = client.post(
-                    "/chat/message",
-                    json={"session_id": session["session_id"], "user_input": user_text},
+                response = post_message_with_retry(
+                    client,
+                    {"session_id": session["session_id"], "user_input": user_text},
+                    args.max_retries,
                 )
-                response.raise_for_status()
                 body = response.json()
                 turn_expected_risk = expected_risk if turn_number == len(turns) else None
                 if turn_expected_risk and turn_expected_risk not in body["risk_level"]:
@@ -107,11 +190,12 @@ def generate(args):
                             "observed": body["risk_level"],
                         }
                     )
-                records.append(
+                conversation_records.append(
                     {
                         "schema_version": "2.0",
                         "data_origin": "groq_synthetic_scenario_replay",
                         "conversation_id": conversation_id,
+                        "scenario_index": scenario_index,
                         "turn_number": turn_number,
                         "expected_risk": turn_expected_risk,
                         "observed_risk": body["risk_level"],
@@ -122,11 +206,26 @@ def generate(args):
                     }
                 )
             client.post("/chat/end", json={"session_id": session["session_id"]})
+            with checkpoint.open("a", encoding="utf-8") as handle:
+                for record in conversation_records:
+                    handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+            records.extend(conversation_records)
+            if (scenario_index + 1) % args.progress_every == 0 or scenario_index + 1 == args.conversations:
+                print(
+                    json.dumps(
+                        {
+                            "event": "generation_progress",
+                            "completed_conversations": scenario_index + 1,
+                            "requested_conversations": args.conversations,
+                            "completion_percent": round(
+                                (scenario_index + 1) * 100 / args.conversations, 2
+                            ),
+                        }
+                    ),
+                    flush=True,
+                )
 
-    output.write_text(
-        "".join(json.dumps(record, ensure_ascii=False) + "\n" for record in records),
-        encoding="utf-8",
-    )
+    checkpoint.replace(output)
     trainable_records = [
         record
         for record in records
@@ -135,11 +234,16 @@ def generate(args):
     observed_distribution = Counter(
         record["observed_risk"] for record in trainable_records
     )
+    scenario_mismatch_count = sum(
+        1
+        for record in records
+        if record["expected_risk"] and record["expected_risk"] not in record["observed_risk"]
+    )
     summary = {
         "conversations": args.conversations,
         "turns": len(records),
         "trainable_turns": len(trainable_records),
-        "scenario_risk_mismatches": len(risk_mismatches),
+        "scenario_risk_mismatches": scenario_mismatch_count,
         "observed_risk_distribution": dict(sorted(observed_distribution.items())),
         "output": str(output),
         "note": (
@@ -158,6 +262,9 @@ def parse_args():
         "--output", type=Path, default=Path("data/groq_dialogues.jsonl")
     )
     parser.add_argument("--seed", type=int, default=20260812)
+    parser.add_argument("--max-retries", type=int, default=6)
+    parser.add_argument("--progress-every", type=int, default=10)
+    parser.add_argument("--resume", action="store_true")
     return parser.parse_args()
 
 

@@ -11,6 +11,7 @@ from mindtriage.config import Settings
 from mindtriage.sessions import MemorySessionStore, build_session_store
 from mindtriage.training import TrainingMonitor
 from mindtriage.generation import ConversationGenerator
+from scripts.generate_dialogue_scenarios import post_message_with_retry
 
 
 class FakeProgressBar:
@@ -119,6 +120,21 @@ class ComponentTests(unittest.TestCase):
             generator.client.chat.completions.create.call_args.kwargs["reasoning_effort"],
             "low",
         )
+
+    @patch("scripts.generate_dialogue_scenarios.time.sleep")
+    def test_generation_retries_transient_service_failure(self, sleep):
+        unavailable = Mock(status_code=503)
+        success = Mock(status_code=200)
+        client = Mock()
+        client.post.side_effect = [unavailable, success]
+
+        response = post_message_with_retry(
+            client, {"session_id": "session", "user_input": "hello"}, max_retries=2
+        )
+
+        self.assertIs(response, success)
+        self.assertEqual(client.post.call_count, 2)
+        sleep.assert_called_once_with(2)
 
     def test_deleted_memory_session_cannot_be_resurrected_by_a_late_save(self):
         store = MemorySessionStore(ttl_seconds=60)
