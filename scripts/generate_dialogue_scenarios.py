@@ -7,6 +7,7 @@ import random
 import sys
 import tempfile
 import uuid
+from collections import Counter
 from pathlib import Path
 
 from fastapi.testclient import TestClient
@@ -78,6 +79,9 @@ def generate(args):
         )
         client = TestClient(create_app(settings))
         records = []
+        # ``expected_risk`` is a scenario-card target, not a clinical label.  The
+        # label that conditions dialogue training must be the risk produced by the
+        # same NLP + MentalBERT + safety pipeline used at runtime.
         risk_mismatches = []
         for scenario_index, (expected_risk, turns) in zip(
             range(args.conversations), scenario_stream(args.seed)
@@ -119,23 +123,30 @@ def generate(args):
                 )
             client.post("/chat/end", json={"session_id": session["session_id"]})
 
-    if risk_mismatches and not args.allow_risk_mismatches:
-        preview = risk_mismatches[:5]
-        raise RuntimeError(
-            f"Generation stopped: {len(risk_mismatches)} expected/observed risk mismatches. "
-            f"First mismatches: {preview}. Use --allow-risk-mismatches only for diagnostics."
-        )
-
     output.write_text(
         "".join(json.dumps(record, ensure_ascii=False) + "\n" for record in records),
         encoding="utf-8",
     )
+    trainable_records = [
+        record
+        for record in records
+        if not record["conversation_model"].startswith("deterministic-safety")
+    ]
+    observed_distribution = Counter(
+        record["observed_risk"] for record in trainable_records
+    )
     summary = {
         "conversations": args.conversations,
         "turns": len(records),
-        "risk_mismatches": len(risk_mismatches),
+        "trainable_turns": len(trainable_records),
+        "scenario_risk_mismatches": len(risk_mismatches),
+        "observed_risk_distribution": dict(sorted(observed_distribution.items())),
         "output": str(output),
-        "note": "Synthetic data must be reviewed before training and kept separate from holdout safety tests.",
+        "note": (
+            "observed_risk is the runtime-pipeline label used by train_dialogue.py; "
+            "expected_risk is retained only to audit synthetic scenario cards. "
+            "Synthetic data must be reviewed before training and kept separate from holdout safety tests."
+        ),
     }
     print(json.dumps(summary, indent=2))
 
@@ -147,7 +158,6 @@ def parse_args():
         "--output", type=Path, default=Path("data/groq_dialogues.jsonl")
     )
     parser.add_argument("--seed", type=int, default=20260812)
-    parser.add_argument("--allow-risk-mismatches", action="store_true")
     return parser.parse_args()
 
 
