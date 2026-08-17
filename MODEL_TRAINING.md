@@ -101,7 +101,7 @@ This trains MentalBERT and DistilBERT separately on identical data splits and wr
 Add `GROQ_API_KEY` to `.env`, train NLP and risk first, then generate project-specific conversations:
 
 ```powershell
-python scripts/generate_dialogue_scenarios.py --conversations 1000
+python scripts/generate_dialogue_scenarios.py --conversations 1000 --compact --model llama-3.1-8b-instant
 python train_dialogue.py --dataset data/groq_dialogues.jsonl
 ```
 

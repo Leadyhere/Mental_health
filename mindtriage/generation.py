@@ -97,13 +97,15 @@ class ConversationGenerator:
             )
         messages.append({"role": "user", "content": user_text})
         try:
-            response = self.client.chat.completions.create(
+            request = dict(
                 model=self.model,
                 messages=messages,
                 temperature=0.4,
                 max_tokens=120,
-                reasoning_effort="low",
             )
+            if self.model.startswith("openai/gpt-oss-"):
+                request["reasoning_effort"] = "low"
+            response = self.client.chat.completions.create(**request)
             reply = response.choices[0].message.content.strip()
         except Exception as exc:
             raise ConversationModelUnavailable(

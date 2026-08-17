@@ -87,7 +87,7 @@ The trainer excludes deterministic emergency messages, removes duplicate pairs, 
 For project-specific dialogue data, replay scenario cards through the trained NLP/risk pipeline and Groq:
 
 ```powershell
-python scripts/generate_dialogue_scenarios.py --conversations 1000
+python scripts/generate_dialogue_scenarios.py --conversations 1000 --compact --model llama-3.1-8b-instant
 python train_dialogue.py --dataset data/groq_dialogues.jsonl
 ```
 

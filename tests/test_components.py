@@ -121,6 +121,22 @@ class ComponentTests(unittest.TestCase):
             "low",
         )
 
+    def test_non_reasoning_groq_model_omits_reasoning_effort(self):
+        generator = ConversationGenerator(Settings(groq_model="llama-3.1-8b-instant"))
+        response = Mock()
+        response.choices = [Mock(message=Mock(content="I hear you."))]
+        generator.client = Mock()
+        generator.client.chat.completions.create.return_value = response
+
+        generator.generate(
+            "I feel low", self.features(), DialogueStateTracker().decide({}, []), [], "Mild", []
+        )
+
+        self.assertNotIn(
+            "reasoning_effort",
+            generator.client.chat.completions.create.call_args.kwargs,
+        )
+
     @patch("scripts.generate_dialogue_scenarios.time.sleep")
     def test_generation_retries_transient_service_failure(self, sleep):
         unavailable = Mock(status_code=503)

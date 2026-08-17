@@ -84,7 +84,7 @@ def post_message_with_retry(client, payload: dict, max_retries: int):
     raise RuntimeError("Unreachable retry state")
 
 
-def load_checkpoint(path: Path) -> tuple[list[dict], set[int]]:
+def load_checkpoint(path: Path, expected_turns: int) -> tuple[list[dict], set[int]]:
     if not path.exists():
         return [], set()
     records = [
@@ -104,9 +104,9 @@ def load_checkpoint(path: Path) -> tuple[list[dict], set[int]]:
     completed = {
         index
         for index, conversation_records in grouped.items()
-        if len(conversation_records) == len(RISK_TURNS) and {
+        if len(conversation_records) == expected_turns and {
             record["turn_number"] for record in conversation_records
-        } == set(range(1, len(RISK_TURNS) + 1))
+        } == set(range(1, expected_turns + 1))
     }
     return records, completed
 
@@ -129,6 +129,8 @@ def generate(args):
         raise ValueError("--max-retries cannot be negative")
     if args.progress_every <= 0:
         raise ValueError("--progress-every must be greater than zero")
+    if args.request_delay < 0:
+        raise ValueError("--request-delay cannot be negative")
     output = args.output.resolve()
     output.parent.mkdir(parents=True, exist_ok=True)
     checkpoint = output.with_name(f"{output.name}.partial")
@@ -137,7 +139,10 @@ def generate(args):
             f"Checkpoint exists at {checkpoint}. Re-run with --resume to continue it, "
             "or delete that checkpoint to start over."
         )
-    records, completed_scenarios = load_checkpoint(checkpoint) if args.resume else ([], set())
+    expected_turns = 1 if args.compact else len(RISK_TURNS)
+    records, completed_scenarios = (
+        load_checkpoint(checkpoint, expected_turns) if args.resume else ([], set())
+    )
     if completed_scenarios:
         print(
             json.dumps(
@@ -154,6 +159,7 @@ def generate(args):
         settings = Settings(
             enable_local_dialogue_model=False,
             enable_redis=False,
+            groq_model=args.model,
             database_url=f"sqlite:///{(temp / 'analytics.db').as_posix()}",
             analytics_hash_secret="synthetic-generation-only",
             dataset_path=temp / "unused.jsonl",
@@ -168,19 +174,24 @@ def generate(args):
         ):
             if scenario_index in completed_scenarios:
                 continue
+            scenario_turns = [" ".join(turns)] if args.compact else turns
             session = client.post(
                 "/chat/start", json={"training_consent": False, "locale": "en-IN"}
             ).json()
             conversation_id = f"synthetic_{args.seed}_{scenario_index}_{uuid.uuid4().hex[:8]}"
             conversation_records = []
-            for turn_number, user_text in enumerate(turns, start=1):
+            for turn_number, user_text in enumerate(scenario_turns, start=1):
                 response = post_message_with_retry(
                     client,
                     {"session_id": session["session_id"], "user_input": user_text},
                     args.max_retries,
                 )
                 body = response.json()
-                turn_expected_risk = expected_risk if turn_number == len(turns) else None
+                if args.request_delay:
+                    time.sleep(args.request_delay)
+                turn_expected_risk = (
+                    expected_risk if turn_number == len(scenario_turns) else None
+                )
                 if turn_expected_risk and turn_expected_risk not in body["risk_level"]:
                     risk_mismatches.append(
                         {
@@ -196,6 +207,7 @@ def generate(args):
                         "data_origin": "groq_synthetic_scenario_replay",
                         "conversation_id": conversation_id,
                         "scenario_index": scenario_index,
+                        "generation_mode": "compact" if args.compact else "multi_turn",
                         "turn_number": turn_number,
                         "expected_risk": turn_expected_risk,
                         "observed_risk": body["risk_level"],
@@ -264,6 +276,13 @@ def parse_args():
     parser.add_argument("--seed", type=int, default=20260812)
     parser.add_argument("--max-retries", type=int, default=6)
     parser.add_argument("--progress-every", type=int, default=10)
+    parser.add_argument("--request-delay", type=float, default=2.1)
+    parser.add_argument("--model", default="llama-3.1-8b-instant")
+    parser.add_argument(
+        "--compact",
+        action="store_true",
+        help="Generate one complete-context training turn per conversation.",
+    )
     parser.add_argument("--resume", action="store_true")
     return parser.parse_args()
 
