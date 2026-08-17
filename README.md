@@ -24,6 +24,9 @@ MindTriage is a privacy-conscious, non-diagnostic conversational support and ris
 
 ## Local setup
 
+Use Python 3.12 or newer. Dependencies are pinned to the versions used by the
+functional test suite.
+
 ```powershell
 python -m pip install -r requirements.txt
 Copy-Item .env.example .env
@@ -44,7 +47,7 @@ Production mode requires PostgreSQL. Redis stores active conversations with a co
 
 ## Train the risk classifier
 
-The workbook contains 11,500 labelled rows across Q1-Q15. Training uses stratified 70/15/15 splits, balanced class weights, AdamW, early stopping, per-class metrics, confusion matrix, and emergency recall.
+The workbook contains 11,500 labelled rows across Q1-Q15. Training removes exact duplicates, then uses stratified 70/15/15 splits, balanced class weights, AdamW, early stopping, per-class metrics, confusion matrix, and emergency recall.
 
 ```powershell
 hf auth login
@@ -52,7 +55,7 @@ python scripts/download_mentalbert.py
 python train_classifier.py --base-model models/base/mental-bert-base-uncased
 ```
 
-Outputs are written to `models/inhouse_risk_classifier/` and loaded automatically. The optional 100,000-row synthetic CSV can augment only the training partition; validation and test remain real workbook rows:
+Outputs are written to `models/inhouse_risk_classifier/` and loaded automatically. The optional 100,000-row synthetic CSV contributes only its 80,000 preassigned training rows. Source-group IDs align its paraphrases with the real workbook split, so validation and test remain real and no source group crosses partitions:
 
 ```powershell
 python train_classifier.py --base-model models/base/mental-bert-base-uncased --synthetic-dataset outputs/dataset-v2/mental_health_synthetic_v2_100k_report.csv
@@ -96,13 +99,16 @@ This writes `data/groq_dialogues.jsonl`. Generation stops if a required neural m
 python -m unittest discover -s tests -v
 ```
 
+All model trainers show batch-level percentage and ETA in the terminal and log metrics to
+TensorBoard under `runs/`. Launch the dashboard with `tensorboard --logdir runs --port 6006`.
+
 ## Key API routes
 
 | Route | Purpose |
 |---|---|
 | `POST /chat/start` | Create a temporary session and record consent choice |
 | `POST /chat/message` | Process one conversation turn |
-| `GET /chat/summary` | Build a non-diagnostic summary |
+| `POST /chat/summary` | Build a non-diagnostic summary without putting the session ID in a URL |
 | `POST /chat/end` | Delete active session data |
 | `GET /health` | Report runtime component status |
 

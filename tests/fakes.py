@@ -30,7 +30,9 @@ class FakeRiskClassifier:
 
     def predict(self, text, features, history):
         lowered = text.lower()
-        if "wish i was dead" in lowered:
+        if "not going to hurt myself" in lowered or "not going to kill myself" in lowered:
+            index = 0
+        elif "wish i was dead" in lowered:
             index = 3
         elif "kill myself" in lowered or "hurt myself" in lowered:
             index = 4
@@ -45,5 +47,7 @@ class FakeConversationGenerator:
     ready = True
     source = "test-neural-dialogue-model"
 
-    def generate(self, user_text, features, decision, history):
+    def generate(
+        self, user_text, features, decision, history, risk_level, safety_reason_codes
+    ):
         return "It sounds like this has been difficult. What feels most important right now?"

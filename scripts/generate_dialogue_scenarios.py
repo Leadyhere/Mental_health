@@ -78,6 +78,7 @@ def generate(args):
         )
         client = TestClient(create_app(settings))
         records = []
+        risk_mismatches = []
         for scenario_index, (expected_risk, turns) in zip(
             range(args.conversations), scenario_stream(args.seed)
         ):
@@ -92,13 +93,23 @@ def generate(args):
                 )
                 response.raise_for_status()
                 body = response.json()
+                turn_expected_risk = expected_risk if turn_number == len(turns) else None
+                if turn_expected_risk and turn_expected_risk not in body["risk_level"]:
+                    risk_mismatches.append(
+                        {
+                            "conversation": scenario_index,
+                            "turn": turn_number,
+                            "expected": turn_expected_risk,
+                            "observed": body["risk_level"],
+                        }
+                    )
                 records.append(
                     {
                         "schema_version": "2.0",
                         "data_origin": "groq_synthetic_scenario_replay",
                         "conversation_id": conversation_id,
                         "turn_number": turn_number,
-                        "expected_risk": expected_risk,
+                        "expected_risk": turn_expected_risk,
                         "observed_risk": body["risk_level"],
                         "user_text": user_text,
                         "assistant_text": body["bot_reply"],
@@ -108,6 +119,13 @@ def generate(args):
                 )
             client.post("/chat/end", json={"session_id": session["session_id"]})
 
+    if risk_mismatches and not args.allow_risk_mismatches:
+        preview = risk_mismatches[:5]
+        raise RuntimeError(
+            f"Generation stopped: {len(risk_mismatches)} expected/observed risk mismatches. "
+            f"First mismatches: {preview}. Use --allow-risk-mismatches only for diagnostics."
+        )
+
     output.write_text(
         "".join(json.dumps(record, ensure_ascii=False) + "\n" for record in records),
         encoding="utf-8",
@@ -115,6 +133,7 @@ def generate(args):
     summary = {
         "conversations": args.conversations,
         "turns": len(records),
+        "risk_mismatches": len(risk_mismatches),
         "output": str(output),
         "note": "Synthetic data must be reviewed before training and kept separate from holdout safety tests.",
     }
@@ -128,6 +147,7 @@ def parse_args():
         "--output", type=Path, default=Path("data/groq_dialogues.jsonl")
     )
     parser.add_argument("--seed", type=int, default=20260812)
+    parser.add_argument("--allow-risk-mismatches", action="store_true")
     return parser.parse_args()
 
 

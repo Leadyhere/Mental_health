@@ -16,6 +16,7 @@ from .schemas import (
     EndSessionRequest,
     MessageRequest,
     StartSessionRequest,
+    SummaryRequest,
     SummaryResponse,
 )
 from .sessions import build_session_store
@@ -28,9 +29,10 @@ def create_app(
     conversation_model=None,
 ) -> FastAPI:
     settings = settings or get_settings()
+    settings.validate()
     app = FastAPI(
         title="MindTriage API",
-        version="2.0.0",
+        version="2.1.0",
         description="Privacy-conscious, non-diagnostic conversational support and triage API",
     )
     app.add_middleware(
@@ -77,6 +79,11 @@ def create_app(
         user_text = req.user_input.strip()
         if not user_text:
             raise HTTPException(status_code=422, detail="Message cannot be empty")
+        if len(user_text) > settings.max_message_chars:
+            raise HTTPException(
+                status_code=422,
+                detail=f"Message exceeds the {settings.max_message_chars}-character limit",
+            )
 
         try:
             features = extractor.extract(user_text)
@@ -102,7 +109,12 @@ def create_app(
         else:
             try:
                 bot_reply = generator.generate(
-                    user_text, features, dialogue_decision, session["chat_history"]
+                    user_text,
+                    features,
+                    dialogue_decision,
+                    session["chat_history"],
+                    safety_decision.final_risk,
+                    safety_decision.reason_codes,
                 )
             except ConversationModelUnavailable as exc:
                 raise HTTPException(status_code=503, detail=str(exc)) from exc
@@ -115,7 +127,11 @@ def create_app(
             session["highest_risk_level"], safety_decision.final_risk
         )
         session["chat_history"].append({"user": user_text, "bot": bot_reply})
-        sessions.save(session)
+        if not sessions.save(session):
+            raise HTTPException(
+                status_code=409,
+                detail="Session ended or expired while the message was processing",
+            )
 
         analytics.risk_event(
             session["session_id"],
@@ -149,14 +165,14 @@ def create_app(
             model_source=model_source,
         )
 
-    @app.get("/chat/summary", response_model=SummaryResponse)
-    def summary(session_id: str):
-        session = sessions.get(session_id)
+    @app.post("/chat/summary", response_model=SummaryResponse)
+    def summary(req: SummaryRequest):
+        session = sessions.get(req.session_id)
         if not session:
             raise HTTPException(status_code=404, detail="Session not found or expired")
         report, concerns = reports.build(session)
         return SummaryResponse(
-            session_id=session_id,
+            session_id=req.session_id,
             report=report,
             risk_level=session["highest_risk_level"],
             concerns=concerns,
@@ -177,14 +193,19 @@ def create_app(
         model_stack_ready = all(
             getattr(component, "ready", True)
             for component in (extractor, risk_classifier, generator)
+        ) and all(
+            getattr(component, "validated", True)
+            for component in (extractor, risk_classifier)
         )
         return {
             "status": "ok" if analytics.health() and model_stack_ready else "degraded",
             "session_store": sessions.name,
             "database": analytics.backend,
             "nlp_models": "ready" if getattr(extractor, "ready", True) else "unavailable",
+            "nlp_validation": getattr(extractor, "validation_status", "test-or-external"),
             "conversation_model": generator.source,
             "risk_model": risk_classifier.model_version,
+            "risk_validation": getattr(risk_classifier, "validation_status", "test-or-external"),
         }
 
     @app.get("/", response_class=HTMLResponse)

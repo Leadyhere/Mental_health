@@ -11,6 +11,8 @@ from torch.optim import AdamW
 from torch.utils.data import DataLoader, Dataset
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
+from mindtriage.training import TrainingMonitor, timestamped_run_dir
+
 
 BASE_DIR = Path(__file__).resolve().parent
 DEFAULT_DATASET = BASE_DIR / "data" / "conversations.jsonl"
@@ -44,6 +46,9 @@ def load_records(path: Path) -> list[dict]:
                 "conversation_id": record.get("conversation_id", f"legacy_{index}"),
                 "user_text": user_text.strip(),
                 "assistant_text": assistant_text.strip(),
+                "risk_level": record.get("risk_level")
+                or record.get("observed_risk")
+                or "unknown",
             }
         )
     return cleaned
@@ -51,13 +56,19 @@ def load_records(path: Path) -> list[dict]:
 
 def grouped_split(records: list[dict], validation_ratio: float, seed: int):
     conversation_ids = sorted({record["conversation_id"] for record in records})
+    if len(conversation_ids) < 2:
+        raise ValueError(
+            "Dialogue training requires at least two distinct conversation IDs so validation "
+            "does not reuse the training conversation."
+        )
     random.Random(seed).shuffle(conversation_ids)
-    validation_count = max(1, int(len(conversation_ids) * validation_ratio))
+    validation_count = min(
+        len(conversation_ids) - 1,
+        max(1, int(len(conversation_ids) * validation_ratio)),
+    )
     validation_ids = set(conversation_ids[:validation_count])
     train_records = [record for record in records if record["conversation_id"] not in validation_ids]
     validation_records = [record for record in records if record["conversation_id"] in validation_ids]
-    if not train_records:
-        train_records, validation_records = records[:-1], records[-1:]
     return train_records, validation_records
 
 
@@ -72,40 +83,61 @@ class DialogueDataset(Dataset):
 
     def __getitem__(self, index):
         record = self.records[index]
-        prompt = f"<|user|>\n{record['user_text']}</s>\n<|assistant|>\n"
-        complete = prompt + record["assistant_text"] + "</s>"
-        encoded = self.tokenizer(
-            complete,
-            truncation=True,
-            padding="max_length",
-            max_length=self.max_length,
-            return_tensors="pt",
+        prompt = (
+            "<|system|>\nProvide non-diagnostic emotional support. "
+            f"Internal safety category: {record['risk_level']}. "
+            "For severe concern, check safety and encourage prompt human support. "
+            "Do not reveal internal labels.</s>\n"
+            f"<|user|>\n{record['user_text']}</s>\n<|assistant|>\n"
         )
-        prompt_ids = self.tokenizer(
-            prompt, truncation=True, max_length=self.max_length, add_special_tokens=True
+        prompt_ids = self.tokenizer(prompt, add_special_tokens=True)["input_ids"]
+        response_ids = self.tokenizer(
+            record["assistant_text"] + "</s>", add_special_tokens=False
         )["input_ids"]
-        input_ids = encoded["input_ids"].squeeze(0)
-        labels = input_ids.clone()
-        labels[: min(len(prompt_ids), self.max_length)] = -100
-        labels[encoded["attention_mask"].squeeze(0) == 0] = -100
+        if not response_ids:
+            raise ValueError("Dialogue record produced no assistant tokens")
+        response_ids = response_ids[: self.max_length]
+        prompt_budget = self.max_length - len(response_ids)
+        prompt_ids = prompt_ids[-prompt_budget:] if prompt_budget else []
+        unpadded = prompt_ids + response_ids
+        padding = self.max_length - len(unpadded)
+        pad_id = self.tokenizer.pad_token_id
+        input_ids = torch.tensor(unpadded + [pad_id] * padding, dtype=torch.long)
+        attention_mask = torch.tensor(
+            [1] * len(unpadded) + [0] * padding, dtype=torch.long
+        )
+        labels = torch.tensor(
+            [-100] * len(prompt_ids) + response_ids + [-100] * padding,
+            dtype=torch.long,
+        )
         return {
             "input_ids": input_ids,
-            "attention_mask": encoded["attention_mask"].squeeze(0),
+            "attention_mask": attention_mask,
             "labels": labels,
         }
 
 
-def validation_loss(model, loader, device):
+def validation_loss(
+    model, loader, device, monitor: TrainingMonitor | None = None,
+    epoch: int | None = None,
+):
     model.eval()
     total = 0.0
+    batches = monitor.evaluation_batches(loader, "validation", epoch) if monitor else loader
     with torch.no_grad():
-        for batch in loader:
+        for batch in batches:
             batch = {key: value.to(device) for key, value in batch.items()}
             total += model(**batch).loss.item()
     return total / max(len(loader), 1)
 
 
 def train(args):
+    if args.epochs <= 0 or args.patience <= 0 or args.batch_size <= 0:
+        raise ValueError("epochs, patience, and batch size must be greater than zero")
+    if args.learning_rate <= 0 or args.max_length <= 0:
+        raise ValueError("learning rate and max length must be greater than zero")
+    if args.log_every_steps <= 0:
+        raise ValueError("log-every-steps must be greater than zero")
     random.seed(args.seed)
     torch.manual_seed(args.seed)
     records = load_records(args.dataset)
@@ -144,10 +176,24 @@ def train(args):
     model.to(device)
     optimizer = AdamW(model.parameters(), lr=args.learning_rate, weight_decay=0.01)
     history = []
+    best_validation_loss = float("inf")
+    best_epoch = 0
+    patience_remaining = args.patience
+    args.output.mkdir(parents=True, exist_ok=True)
+    run_dir = args.tensorboard_dir or timestamped_run_dir(BASE_DIR, "dialogue")
+    monitor = TrainingMonitor(
+        run_dir=run_dir,
+        task_name="dialogue-lora",
+        epochs=args.epochs,
+        steps_per_epoch=len(train_loader),
+        log_every_steps=args.log_every_steps,
+        tensorboard_enabled=not args.no_tensorboard,
+    )
     for epoch in range(args.epochs):
         model.train()
         total = 0.0
-        for batch in train_loader:
+        progress = monitor.training_batches(train_loader, epoch + 1)
+        for batch_number, batch in enumerate(progress, start=1):
             optimizer.zero_grad()
             batch = {key: value.to(device) for key, value in batch.items()}
             loss = model(**batch).loss
@@ -155,16 +201,35 @@ def train(args):
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             optimizer.step()
             total += loss.item()
+            monitor.log_batch(progress, epoch + 1, batch_number, float(loss.item()))
         result = {
             "epoch": epoch + 1,
             "train_loss": total / max(len(train_loader), 1),
-            "validation_loss": validation_loss(model, validation_loader, device),
+            "validation_loss": validation_loss(
+                model, validation_loader, device, monitor, epoch + 1
+            ),
         }
         history.append(result)
-        print(json.dumps(result))
+        monitor.log_epoch(
+            epoch + 1,
+            {
+                "train_loss": result["train_loss"],
+                "validation_loss": result["validation_loss"],
+            },
+        )
+        print(json.dumps(result), flush=True)
+        if result["validation_loss"] < best_validation_loss:
+            best_validation_loss = result["validation_loss"]
+            best_epoch = epoch + 1
+            patience_remaining = args.patience
+            model.save_pretrained(args.output)
+        else:
+            patience_remaining -= 1
+            if patience_remaining == 0:
+                break
 
-    args.output.mkdir(parents=True, exist_ok=True)
-    model.save_pretrained(args.output)
+    monitor.finish(len(history))
+    monitor.close()
     tokenizer.save_pretrained(args.output)
     metrics = {
         "base_model": args.base_model,
@@ -172,6 +237,11 @@ def train(args):
         "records": len(records),
         "train_records": len(train_records),
         "validation_records": len(validation_records),
+        "train_conversations": len({record["conversation_id"] for record in train_records}),
+        "validation_conversations": len({record["conversation_id"] for record in validation_records}),
+        "best_epoch": best_epoch,
+        "best_validation_loss": best_validation_loss,
+        "tensorboard_run": str(run_dir) if not args.no_tensorboard else None,
         "history": history,
     }
     (args.output / "training_metrics.json").write_text(
@@ -191,9 +261,13 @@ def parse_args():
     parser.add_argument("--max-length", type=int, default=512)
     parser.add_argument("--lora-rank", type=int, default=16)
     parser.add_argument("--lora-alpha", type=int, default=32)
+    parser.add_argument("--patience", type=int, default=2)
     parser.add_argument("--minimum-records", type=int, default=100)
     parser.add_argument("--allow-small-dataset", action="store_true")
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--tensorboard-dir", type=Path)
+    parser.add_argument("--no-tensorboard", action="store_true")
+    parser.add_argument("--log-every-steps", type=int, default=1)
     return parser.parse_args()
 
 

@@ -1,3 +1,4 @@
+import json
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -39,6 +40,8 @@ class NeuralFeatureExtractor:
 
     def __init__(self, model_root: Path):
         self.ready = True
+        self.validated = True
+        self.validation_status = "deduplicated-questionnaire-holdout"
         task_dirs = {task: model_root / task for task in ("emotion", "topic", "slots")}
         missing = [str(path) for path in task_dirs.values() if not path.exists()]
         if missing:
@@ -62,11 +65,20 @@ class NeuralFeatureExtractor:
         self.models = {}
         for task, model_class in required.items():
             task_dir = task_dirs[task]
+            metrics_path = task_dir / "metrics.json"
+            try:
+                metrics = json.loads(metrics_path.read_text(encoding="utf-8"))
+                if metrics.get("cross_split_exact_text_overlap") != 0:
+                    self.validated = False
+            except (OSError, ValueError):
+                self.validated = False
             tokenizer = AutoTokenizer.from_pretrained(task_dir, use_fast=True)
             model = model_class.from_pretrained(task_dir)
             model.eval()
             labels = [model.config.id2label[index] for index in range(model.config.num_labels)]
             self.models[task] = (tokenizer, model, labels)
+        if not self.validated:
+            self.validation_status = "legacy-metrics-retrain-required"
 
     def _sequence_prediction(self, task: str, text: str) -> list[str]:
         tokenizer, model, labels = self.models[task]
@@ -136,6 +148,8 @@ class UnavailableFeatureExtractor:
     def __init__(self, reason: str):
         self.reason = reason
         self.ready = False
+        self.validated = False
+        self.validation_status = "unavailable"
 
     def extract(self, text: str) -> ExtractedFeatures:
         raise NLPModelUnavailable(self.reason)

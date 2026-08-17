@@ -14,6 +14,7 @@
 | Safety | Deterministic emergency guard | Fail-safe override only; not a normal classifier |
 | Training | PyTorch, Transformers, scikit-learn | Classifier training and evaluation |
 | Dialogue training | PEFT LoRA | Efficient local causal-LM adaptation |
+| Training monitoring | tqdm, TensorBoard | Batch percentage, ETA, loss curves, and metrics dashboard |
 | Packaging | Docker Compose | API, PostgreSQL, and Redis services |
 | Testing | unittest, FastAPI TestClient | Component and integrated API verification |
 

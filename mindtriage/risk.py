@@ -20,9 +20,9 @@ class RiskModelUnavailable(RuntimeError):
 
 def risk_index(level: str) -> int:
     try:
-        return next(index for index, value in enumerate(RISK_LEVELS) if value == level)
-    except StopIteration:
-        return 0
+        return RISK_LEVELS.index(level)
+    except ValueError as exc:
+        raise ValueError(f"Unknown risk level: {level}") from exc
 
 
 def highest_risk(*levels: str) -> str:
@@ -42,6 +42,8 @@ class RiskClassifier:
         self.tokenizer = None
         self.torch = None
         self.model_version = "unavailable"
+        self.validated = False
+        self.validation_status = "unavailable"
         if settings.local_risk_model_dir.exists():
             self._load(settings.local_risk_model_dir)
 
@@ -54,15 +56,36 @@ class RiskClassifier:
             self.tokenizer = AutoTokenizer.from_pretrained(model_dir)
             self.model = AutoModelForSequenceClassification.from_pretrained(model_dir)
             self.model.eval()
+            expected_labels = [level.split(" - ", 1)[1].split(" (", 1)[0] for level in RISK_LEVELS]
+            actual_labels = [
+                self.model.config.id2label[index]
+                for index in range(self.model.config.num_labels)
+            ]
+            if actual_labels != expected_labels:
+                raise ValueError(
+                    f"Risk label order mismatch: expected {expected_labels}, got {actual_labels}"
+                )
             metadata_path = model_dir / "model_metadata.json"
             if metadata_path.exists():
                 self.model_version = json.loads(metadata_path.read_text())["model_version"]
             else:
                 self.model_version = model_dir.name
+            metrics_path = model_dir / "metrics.json"
+            metrics = json.loads(metrics_path.read_text(encoding="utf-8"))
+            self.validated = (
+                metrics.get("data_quality", {}).get("cross_split_exact_text_overlap") == 0
+            )
+            self.validation_status = (
+                "deduplicated-questionnaire-holdout"
+                if self.validated
+                else "legacy-metrics-retrain-required"
+            )
         except Exception as exc:
             print(f"[WARNING] Local risk model could not be loaded: {exc}")
             self.model = None
             self.tokenizer = None
+            self.validated = False
+            self.validation_status = "unavailable"
 
     @property
     def ready(self) -> bool:

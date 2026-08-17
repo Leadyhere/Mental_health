@@ -16,7 +16,8 @@ mentality/
 |   |-- risk.py                    Neural risk inference and risk ordering
 |   |-- safety.py                  Independent emergency fail-safe
 |   |-- schemas.py                 API contracts
-|   `-- sessions.py                Redis/memory session stores
+|   |-- sessions.py                Redis/memory session stores
+|   `-- training.py                Shared percentage/ETA and TensorBoard monitoring
 |-- train_classifier.py            MentalBERT risk training and evaluation
 |-- train_nlp.py                   Transformer emotion/topic/slot training
 |-- train_dialogue.py              TinyLlama LoRA fine-tuning

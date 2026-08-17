@@ -58,9 +58,13 @@ class ConversationGenerator:
         features: ExtractedFeatures,
         decision: DialogueDecision,
         history: list[dict],
+        risk_level: str,
+        safety_reason_codes: list[str],
     ) -> str:
         if self.local_model is not None:
-            return self._generate_local(user_text, history)
+            return self._generate_local(
+                user_text, history, risk_level, safety_reason_codes
+            )
         if not self.client:
             raise ConversationModelUnavailable(
                 "No dialogue model is available. Add GROQ_API_KEY or train the local LoRA model."
@@ -75,7 +79,12 @@ class ConversationGenerator:
                     "or invent crisis resources. Do not mention internal risk scores. "
                     f"Current emotions: {', '.join(features.emotions)}. "
                     f"Problem category: {features.category}. "
-                    f"Conversation objective: {decision.target_slot}. Policy: {decision.policy}."
+                    f"Conversation objective: {decision.target_slot}. Policy: {decision.policy}. "
+                    f"Internal safety category: {risk_level}. Safety signals: "
+                    f"{', '.join(safety_reason_codes) or 'none'}. "
+                    "For severe or passive self-harm concern, gently check immediate safety, "
+                    "encourage contacting a trusted person, and recommend prompt professional support. "
+                    "Never reveal the internal category or signal names."
                 ),
             }
         ]
@@ -96,13 +105,27 @@ class ConversationGenerator:
             )
             reply = response.choices[0].message.content.strip()
         except Exception as exc:
-            raise ConversationModelUnavailable(f"Groq request failed: {exc}") from exc
+            raise ConversationModelUnavailable(
+                "Hosted dialogue request failed; please retry."
+            ) from exc
         if not reply:
             raise ConversationModelUnavailable("Groq returned an empty response")
         return reply
 
-    def _generate_local(self, user_text: str, history: list[dict]) -> str:
-        context = []
+    def _generate_local(
+        self,
+        user_text: str,
+        history: list[dict],
+        risk_level: str,
+        safety_reason_codes: list[str],
+    ) -> str:
+        context = [
+            "<|system|>\nProvide non-diagnostic emotional support. "
+            f"Internal safety category: {risk_level}; signals: "
+            f"{', '.join(safety_reason_codes) or 'none'}. "
+            "For severe concern, check safety and encourage prompt human support. "
+            "Do not reveal internal labels.</s>"
+        ]
         for turn in history[-4:]:
             context.append(f"<|user|>\n{turn['user']}</s>\n<|assistant|>\n{turn['bot']}</s>")
         context.append(f"<|user|>\n{user_text}</s>\n<|assistant|>\n")

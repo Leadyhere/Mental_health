@@ -20,6 +20,8 @@ from transformers import (
     get_linear_schedule_with_warmup,
 )
 
+from mindtriage.training import TrainingMonitor, timestamped_run_dir
+
 
 BASE_DIR = Path(__file__).resolve().parent
 DEFAULT_DATASET = BASE_DIR / "mental_health_final_USER_TONE_dataset (1).xlsx"
@@ -83,6 +85,19 @@ def build_text(row: pd.Series) -> str:
     return " | ".join(parts)
 
 
+def deduplicate_labeled_text(frame: pd.DataFrame) -> pd.DataFrame:
+    conflicts = frame.groupby("text")["label"].nunique()
+    conflicting_texts = conflicts[conflicts > 1]
+    if not conflicting_texts.empty:
+        raise ValueError(
+            f"Found {len(conflicting_texts)} duplicate texts with conflicting risk labels"
+        )
+    result = frame.drop_duplicates(subset=["text"], keep="first").reset_index(drop=True)
+    result.attrs["rows_before_deduplication"] = len(frame)
+    result.attrs["duplicates_removed"] = len(frame) - len(result)
+    return result
+
+
 def load_dataset(path: Path) -> pd.DataFrame:
     frame = pd.read_excel(path, sheet_name="Combined Data")
     missing = [column for column in QUESTION_COLUMNS + ["Risk Level"] if column not in frame.columns]
@@ -91,24 +106,49 @@ def load_dataset(path: Path) -> pd.DataFrame:
     frame = frame.copy()
     frame["Risk Level"] = frame["Risk Level"].astype(str).str.strip()
     frame = frame[frame["Risk Level"].isin(LABEL_MAP)].copy()
+    group_columns = QUESTION_COLUMNS + ["Risk Level"]
+
+    def source_key(row):
+        return tuple(
+            None if pd.isna(row[column]) else row[column]
+            for column in group_columns
+        )
+
+    source_keys = frame.apply(source_key, axis=1)
+    source_ids = {}
+    for key in source_keys:
+        if key not in source_ids:
+            source_ids[key] = f"SRC_{len(source_ids) + 1:05d}"
+    frame["Source Group ID"] = [source_ids[key] for key in source_keys]
     frame["text"] = frame.apply(build_text, axis=1)
     frame = frame[frame["text"].str.len() > 0].copy()
     frame["label"] = frame["Risk Level"].map(LABEL_MAP)
     if frame.empty:
         raise ValueError("No valid labelled rows were found")
-    return frame[["text", "label", "Risk Level"]].reset_index(drop=True)
+    return deduplicate_labeled_text(
+        frame[["text", "label", "Risk Level", "Source Group ID"]].reset_index(drop=True)
+    )
 
 
 def load_synthetic_training_data(path: Path) -> pd.DataFrame:
     frame = pd.read_csv(path)
-    required = {"Combined Text", "Risk Level"}
+    required = {"Combined Text", "Risk Level", "Source Group ID", "Split"}
     if not required.issubset(frame.columns):
         raise ValueError(f"Synthetic dataset must contain {sorted(required)}")
     frame["Risk Level"] = frame["Risk Level"].astype(str).str.strip()
     frame = frame[frame["Risk Level"].isin(LABEL_MAP)].copy()
-    frame["text"] = frame["Combined Text"].astype(str).str.strip()
+    frame["text"] = frame["Combined Text"].fillna("").astype(str).str.strip()
+    frame = frame[frame["text"].str.len() > 0].copy()
     frame["label"] = frame["Risk Level"].map(LABEL_MAP)
-    return frame[["text", "label", "Risk Level"]].reset_index(drop=True)
+    frame["Split"] = frame["Split"].astype(str).str.strip().str.lower()
+    if not set(frame["Split"]).issubset({"train", "validation", "test"}):
+        raise ValueError("Synthetic Split must contain only train, validation, or test")
+    group_split_counts = frame.groupby("Source Group ID")["Split"].nunique()
+    if (group_split_counts > 1).any():
+        raise ValueError("Synthetic source groups cross dataset splits")
+    return deduplicate_labeled_text(
+        frame[["text", "label", "Risk Level", "Source Group ID", "Split"]].reset_index(drop=True)
+    )
 
 
 class RiskDataset(Dataset):
@@ -136,13 +176,17 @@ class RiskDataset(Dataset):
         }
 
 
-def evaluate(model, loader, device) -> tuple[float, list[int], list[int]]:
+def evaluate(
+    model, loader, device, monitor: TrainingMonitor | None = None,
+    phase: str = "evaluation", epoch: int | None = None,
+) -> tuple[float, list[int], list[int]]:
     model.eval()
     total_loss = 0.0
     predictions, targets = [], []
     loss_fn = torch.nn.CrossEntropyLoss()
+    batches = monitor.evaluation_batches(loader, phase, epoch) if monitor else loader
     with torch.no_grad():
-        for batch in loader:
+        for batch in batches:
             labels = batch.pop("labels").to(device)
             inputs = {key: value.to(device) for key, value in batch.items()}
             logits = model(**inputs).logits
@@ -153,24 +197,55 @@ def evaluate(model, loader, device) -> tuple[float, list[int], list[int]]:
 
 
 def train(args) -> None:
+    if args.epochs <= 0 or args.patience <= 0 or args.batch_size <= 0:
+        raise ValueError("epochs, patience, and batch size must be greater than zero")
+    if args.learning_rate <= 0 or args.max_length <= 0:
+        raise ValueError("learning rate and max length must be greater than zero")
+    if args.log_every_steps <= 0:
+        raise ValueError("log-every-steps must be greater than zero")
     seed_everything(args.seed)
     frame = load_dataset(args.dataset)
-    train_frame, temp_frame = train_test_split(
-        frame, test_size=0.30, stratify=frame["label"], random_state=args.seed
-    )
-    validation_frame, test_frame = train_test_split(
-        temp_frame, test_size=0.50, stratify=temp_frame["label"], random_state=args.seed
-    )
-    primary_train_size = len(train_frame)
-    synthetic_train_size = 0
+    rows_before_deduplication = frame.attrs.get("rows_before_deduplication", len(frame))
+    duplicates_removed = frame.attrs.get("duplicates_removed", 0)
+    synthetic_frame = None
     if args.synthetic_dataset:
         synthetic_frame = load_synthetic_training_data(args.synthetic_dataset)
+        split_map = (
+            synthetic_frame[["Source Group ID", "Split"]]
+            .drop_duplicates()
+            .set_index("Source Group ID")["Split"]
+        )
+        unknown_groups = set(frame["Source Group ID"]) - set(split_map.index)
+        if unknown_groups:
+            raise ValueError(
+                f"Synthetic split metadata is missing {len(unknown_groups)} real source groups"
+            )
+        assigned_split = frame["Source Group ID"].map(split_map)
+        train_frame = frame[assigned_split == "train"].copy()
+        validation_frame = frame[assigned_split == "validation"].copy()
+        test_frame = frame[assigned_split == "test"].copy()
+        if any(part.empty for part in (train_frame, validation_frame, test_frame)):
+            raise ValueError("Source-group split produced an empty real-data partition")
+    else:
+        train_frame, temp_frame = train_test_split(
+            frame, test_size=0.30, stratify=frame["label"], random_state=args.seed
+        )
+        validation_frame, test_frame = train_test_split(
+            temp_frame, test_size=0.50, stratify=temp_frame["label"], random_state=args.seed
+        )
+    primary_train_size = len(train_frame)
+    synthetic_train_size = 0
+    if synthetic_frame is not None:
+        synthetic_frame = synthetic_frame[synthetic_frame["Split"] == "train"].copy()
         if args.max_synthetic_rows:
             synthetic_frame = synthetic_frame.sample(
                 min(args.max_synthetic_rows, len(synthetic_frame)), random_state=args.seed
             )
+        real_texts = set(frame["text"])
+        synthetic_frame = synthetic_frame[~synthetic_frame["text"].isin(real_texts)].copy()
         synthetic_train_size = len(synthetic_frame)
         train_frame = pd.concat([train_frame, synthetic_frame], ignore_index=True)
+        train_frame = deduplicate_labeled_text(train_frame)
 
     try:
         tokenizer = AutoTokenizer.from_pretrained(args.base_model)
@@ -221,10 +296,20 @@ def train(args) -> None:
     best_state = None
     patience_remaining = args.patience
     history = []
+    run_dir = args.tensorboard_dir or timestamped_run_dir(BASE_DIR, "risk")
+    monitor = TrainingMonitor(
+        run_dir=run_dir,
+        task_name="risk",
+        epochs=args.epochs,
+        steps_per_epoch=len(train_loader),
+        log_every_steps=args.log_every_steps,
+        tensorboard_enabled=not args.no_tensorboard,
+    )
     for epoch in range(args.epochs):
         model.train()
         running_loss = 0.0
-        for batch in train_loader:
+        progress = monitor.training_batches(train_loader, epoch + 1)
+        for batch_number, batch in enumerate(progress, start=1):
             optimizer.zero_grad()
             labels = batch.pop("labels").to(device)
             inputs = {key: value.to(device) for key, value in batch.items()}
@@ -235,15 +320,32 @@ def train(args) -> None:
             optimizer.step()
             scheduler.step()
             running_loss += loss.item()
+            monitor.log_batch(
+                progress, epoch + 1, batch_number, float(loss.item())
+            )
 
-        validation_loss, _, _ = evaluate(model, validation_loader, device)
+        validation_loss, _, _ = evaluate(
+            model,
+            validation_loader,
+            device,
+            monitor=monitor,
+            phase="validation",
+            epoch=epoch + 1,
+        )
         epoch_result = {
             "epoch": epoch + 1,
             "train_loss": running_loss / max(len(train_loader), 1),
             "validation_loss": validation_loss,
         }
         history.append(epoch_result)
-        print(json.dumps(epoch_result))
+        monitor.log_epoch(
+            epoch + 1,
+            {
+                "train_loss": epoch_result["train_loss"],
+                "validation_loss": validation_loss,
+            },
+        )
+        print(json.dumps(epoch_result), flush=True)
         if validation_loss < best_validation_loss:
             best_validation_loss = validation_loss
             best_state = {key: value.detach().cpu().clone() for key, value in model.state_dict().items()}
@@ -257,7 +359,12 @@ def train(args) -> None:
         model.load_state_dict(best_state)
         model.to(device)
 
-    test_loss, predictions, targets = evaluate(model, test_loader, device)
+    test_loss, predictions, targets = evaluate(
+        model, test_loader, device, monitor=monitor, phase="test"
+    )
+    monitor.log_test({"loss": test_loss})
+    monitor.finish(len(history))
+    monitor.close()
     report = classification_report(
         targets,
         predictions,
@@ -281,7 +388,20 @@ def train(args) -> None:
             "test": len(test_frame),
         },
         "class_counts": frame["Risk Level"].value_counts().to_dict(),
+        "data_quality": {
+            "source_rows_before_deduplication": rows_before_deduplication,
+            "exact_duplicates_removed": duplicates_removed,
+            "cross_split_exact_text_overlap": 0,
+            "source_group_split": (
+                "synthetic_metadata" if args.synthetic_dataset else "stratified_real_only"
+            ),
+            "evaluation_scope": (
+                "Questionnaire-form holdout only; conversational and clinical validation "
+                "must be performed separately."
+            ),
+        },
         "history": history,
+        "tensorboard_run": str(run_dir) if not args.no_tensorboard else None,
     }
 
     args.output.mkdir(parents=True, exist_ok=True)
@@ -314,6 +434,9 @@ def parse_args():
     parser.add_argument("--learning-rate", type=float, default=2e-5)
     parser.add_argument("--max-length", type=int, default=256)
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--tensorboard-dir", type=Path)
+    parser.add_argument("--no-tensorboard", action="store_true")
+    parser.add_argument("--log-every-steps", type=int, default=1)
     return parser.parse_args()
 
 
