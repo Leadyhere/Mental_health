@@ -17,7 +17,7 @@ MindTriage is a privacy-conscious, non-diagnostic conversational support and ris
 - MentalBERT five-class inference; missing weights fail closed with HTTP 503
 - Cross-turn highest-risk retention
 - Deterministic active/passive self-harm rules and controlled emergency response
-- Groq `llama-3.3-70b-versatile` or a local TinyLlama LoRA dialogue model
+- Groq `openai/gpt-oss-120b` or a local TinyLlama LoRA dialogue model
 - Full MentalBERT training/evaluation pipeline using all Q1-Q15 fields
 - LoRA dialogue fine-tuning pipeline using consented JSONL records
 - Docker, Redis, PostgreSQL, health checks, and automated tests

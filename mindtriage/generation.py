@@ -8,7 +8,7 @@ class ConversationModelUnavailable(RuntimeError):
 
 
 class ConversationGenerator:
-    """Uses either Groq Llama 3.3 or the trained local LoRA dialogue model."""
+    """Uses Groq GPT-OSS or the trained local LoRA dialogue model."""
 
     def __init__(self, settings: Settings):
         self.client = None
@@ -102,6 +102,7 @@ class ConversationGenerator:
                 messages=messages,
                 temperature=0.4,
                 max_tokens=120,
+                reasoning_effort="low",
             )
             reply = response.choices[0].message.content.strip()
         except Exception as exc:

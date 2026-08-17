@@ -1,7 +1,7 @@
 import unittest
 import tempfile
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from mindtriage.dialogue import DialogueStateTracker
 from mindtriage.nlp import ExtractedFeatures, NLPModelUnavailable, UnavailableFeatureExtractor
@@ -10,6 +10,7 @@ from mindtriage.safety import SafetyEngine
 from mindtriage.config import Settings
 from mindtriage.sessions import MemorySessionStore, build_session_store
 from mindtriage.training import TrainingMonitor
+from mindtriage.generation import ConversationGenerator
 
 
 class FakeProgressBar:
@@ -99,6 +100,25 @@ class ComponentTests(unittest.TestCase):
     def test_unknown_environment_cannot_bypass_production_checks(self):
         with self.assertRaisesRegex(RuntimeError, "APP_ENV"):
             Settings(environment="prodution", enable_redis=False).validate()
+
+    def test_groq_generation_uses_low_reasoning_effort(self):
+        settings = Settings(groq_model="openai/gpt-oss-120b")
+        generator = ConversationGenerator(settings)
+        response = Mock()
+        response.choices = [Mock(message=Mock(content="I hear you."))]
+        generator.client = Mock()
+        generator.client.chat.completions.create.return_value = response
+        features = ExtractedFeatures(
+            emotions=["sad"], category="general", narrative_depth=0.2,
+            trigger=None, duration=None, impact=None, coping=None, support=None,
+        )
+        generator.generate(
+            "I feel low", features, DialogueStateTracker().decide({}, []), [], "Mild", []
+        )
+        self.assertEqual(
+            generator.client.chat.completions.create.call_args.kwargs["reasoning_effort"],
+            "low",
+        )
 
     def test_deleted_memory_session_cannot_be_resurrected_by_a_late_save(self):
         store = MemorySessionStore(ttl_seconds=60)

@@ -40,7 +40,7 @@ class Settings:
         default_factory=lambda: os.getenv("APP_ENV", "development").strip().lower()
     )
     groq_api_key: str = field(default_factory=lambda: os.getenv("GROQ_API_KEY", ""))
-    groq_model: str = field(default_factory=lambda: os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile"))
+    groq_model: str = field(default_factory=lambda: os.getenv("GROQ_MODEL", "openai/gpt-oss-120b"))
     local_risk_model_dir: Path = field(
         default_factory=lambda: _path_setting(
             "LOCAL_MODEL_DIR", BASE_DIR / "models" / "inhouse_risk_classifier"

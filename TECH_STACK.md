@@ -6,7 +6,7 @@
 | API | Python, FastAPI, Pydantic | Validation and orchestration |
 | Session data | Redis | Temporary active conversation storage with TTL |
 | Analytics | PostgreSQL; SQLite locally | Anonymized sessions and risk events |
-| Conversation model | Groq Llama 3.3 70B | MI/OARS-style conversational wording |
+| Conversation model | Groq GPT-OSS 120B (low reasoning effort) or TinyLlama LoRA | MI/OARS-style conversational wording |
 | Local dialogue | TinyLlama 1.1B + PEFT LoRA | In-house generative response model |
 | Risk model | Fine-tuned MentalBERT | Five-level risk classification |
 | NLP extraction | Three fine-tuned transformer heads | Emotion, problem-topic, and semantic-slot detection |
