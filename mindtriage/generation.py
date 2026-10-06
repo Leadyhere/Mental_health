@@ -1,3 +1,6 @@
+import re
+import time
+
 from .config import Settings
 from .dialogue import DialogueDecision
 from .nlp import ExtractedFeatures
@@ -8,7 +11,7 @@ class ConversationModelUnavailable(RuntimeError):
 
 
 class ConversationGenerator:
-    """Uses Groq GPT-OSS or the trained local LoRA dialogue model."""
+    """Uses Groq Qwen or the trained local LoRA dialogue model."""
 
     def __init__(self, settings: Settings):
         self.client = None
@@ -96,21 +99,38 @@ class ConversationGenerator:
                 ]
             )
         messages.append({"role": "user", "content": user_text})
-        try:
-            request = dict(
-                model=self.model,
-                messages=messages,
-                temperature=0.4,
-                max_tokens=120,
-            )
-            if self.model.startswith("openai/gpt-oss-"):
-                request["reasoning_effort"] = "low"
-            response = self.client.chat.completions.create(**request)
-            reply = response.choices[0].message.content.strip()
-        except Exception as exc:
+        request = dict(
+            model=self.model,
+            messages=messages,
+            temperature=0.4,
+            max_tokens=120,
+        )
+        if self.model.startswith("qwen/"):
+            request["reasoning_effort"] = "none"
+        last_error = None
+        for attempt in range(3):
+            try:
+                response = self.client.chat.completions.create(**request)
+                reply = response.choices[0].message.content.strip()
+                break
+            except Exception as exc:
+                last_error = exc
+                status = getattr(exc, "status_code", None)
+                transient = status is None or status in {408, 409, 429} or status >= 500
+                if not transient or attempt == 2:
+                    raise ConversationModelUnavailable(
+                        "Hosted dialogue request failed; please retry."
+                    ) from exc
+                time.sleep(2**attempt)
+        else:
             raise ConversationModelUnavailable(
                 "Hosted dialogue request failed; please retry."
-            ) from exc
+            ) from last_error
+        reply = re.sub(r"<think>.*?</think>\s*", "", reply, flags=re.IGNORECASE | re.DOTALL)
+        if re.search(r"<think>", reply, flags=re.IGNORECASE):
+            raise ConversationModelUnavailable(
+                "Hosted dialogue returned incomplete internal reasoning; please retry."
+            )
         if not reply:
             raise ConversationModelUnavailable("Groq returned an empty response")
         return reply

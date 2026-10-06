@@ -277,7 +277,7 @@ def parse_args():
     parser.add_argument("--max-retries", type=int, default=6)
     parser.add_argument("--progress-every", type=int, default=10)
     parser.add_argument("--request-delay", type=float, default=2.1)
-    parser.add_argument("--model", default="llama-3.1-8b-instant")
+    parser.add_argument("--model", default="qwen/qwen3.8-27b")
     parser.add_argument(
         "--compact",
         action="store_true",
