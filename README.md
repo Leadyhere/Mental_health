@@ -17,7 +17,7 @@ MindTriage is a privacy-conscious, non-diagnostic conversational support and ris
 - MentalBERT five-class inference; missing weights fail closed with HTTP 503
 - Cross-turn highest-risk retention
 - Deterministic active/passive self-harm rules and controlled emergency response
-- Groq `openai/gpt-oss-120b` or a local TinyLlama LoRA dialogue model
+- Groq `qwen/qwen3.8-27b` or a local TinyLlama LoRA dialogue model
 - Full MentalBERT training/evaluation pipeline using all Q1-Q15 fields
 - LoRA dialogue fine-tuning pipeline using consented JSONL records
 - Docker, Redis, PostgreSQL, health checks, and automated tests
@@ -87,7 +87,7 @@ The trainer excludes deterministic emergency messages, removes duplicate pairs, 
 For project-specific dialogue data, replay scenario cards through the trained NLP/risk pipeline and Groq:
 
 ```powershell
-python scripts/generate_dialogue_scenarios.py --conversations 1000
+python scripts/generate_dialogue_scenarios.py --conversations 1000 --compact --model qwen/qwen3.8-27b
 python train_dialogue.py --dataset data/groq_dialogues.jsonl
 ```
 

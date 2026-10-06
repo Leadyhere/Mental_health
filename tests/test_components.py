@@ -10,7 +10,8 @@ from mindtriage.safety import SafetyEngine
 from mindtriage.config import Settings
 from mindtriage.sessions import MemorySessionStore, build_session_store
 from mindtriage.training import TrainingMonitor
-from mindtriage.generation import ConversationGenerator
+from mindtriage.generation import ConversationGenerator, ConversationModelUnavailable
+from scripts.generate_dialogue_scenarios import post_message_with_retry
 
 
 class FakeProgressBar:
@@ -101,24 +102,83 @@ class ComponentTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "APP_ENV"):
             Settings(environment="prodution", enable_redis=False).validate()
 
-    def test_groq_generation_uses_low_reasoning_effort(self):
-        settings = Settings(groq_model="openai/gpt-oss-120b")
-        generator = ConversationGenerator(settings)
+    def test_groq_generation_uses_configured_qwen_model(self):
+        generator = ConversationGenerator(Settings(groq_model="qwen/qwen3.8-27b"))
         response = Mock()
         response.choices = [Mock(message=Mock(content="I hear you."))]
         generator.client = Mock()
         generator.client.chat.completions.create.return_value = response
-        features = ExtractedFeatures(
-            emotions=["sad"], category="general", narrative_depth=0.2,
-            trigger=None, duration=None, impact=None, coping=None, support=None,
-        )
+
         generator.generate(
-            "I feel low", features, DialogueStateTracker().decide({}, []), [], "Mild", []
+            "I feel low", self.features(), DialogueStateTracker().decide({}, []), [], "Mild", []
         )
+
         self.assertEqual(
             generator.client.chat.completions.create.call_args.kwargs["reasoning_effort"],
-            "low",
+            "none",
         )
+        self.assertEqual(
+            generator.client.chat.completions.create.call_args.kwargs["model"],
+            "qwen/qwen3.8-27b",
+        )
+
+    def test_groq_generation_removes_complete_thinking_trace(self):
+        generator = ConversationGenerator(Settings(groq_model="qwen/qwen3.8-27b"))
+        response = Mock()
+        response.choices = [Mock(message=Mock(content="<think>internal labels</think>I hear you."))]
+        generator.client = Mock()
+        generator.client.chat.completions.create.return_value = response
+
+        reply = generator.generate(
+            "I feel low", self.features(), DialogueStateTracker().decide({}, []), [], "Mild", []
+        )
+
+        self.assertEqual(reply, "I hear you.")
+
+    def test_groq_generation_rejects_incomplete_thinking_trace(self):
+        generator = ConversationGenerator(Settings(groq_model="qwen/qwen3.8-27b"))
+        response = Mock()
+        response.choices = [Mock(message=Mock(content="<think>internal labels"))]
+        generator.client = Mock()
+        generator.client.chat.completions.create.return_value = response
+
+        with self.assertRaises(ConversationModelUnavailable):
+            generator.generate(
+                "I feel low", self.features(), DialogueStateTracker().decide({}, []), [], "Mild", []
+            )
+
+    @patch("mindtriage.generation.time.sleep")
+    def test_groq_generation_retries_transient_failure(self, sleep):
+        generator = ConversationGenerator(Settings(groq_model="qwen/qwen3.8-27b"))
+        transient = RuntimeError("temporary")
+        transient.status_code = 503
+        response = Mock()
+        response.choices = [Mock(message=Mock(content="I hear you."))]
+        generator.client = Mock()
+        generator.client.chat.completions.create.side_effect = [transient, response]
+
+        reply = generator.generate(
+            "I feel low", self.features(), DialogueStateTracker().decide({}, []), [], "Mild", []
+        )
+
+        self.assertEqual(reply, "I hear you.")
+        self.assertEqual(generator.client.chat.completions.create.call_count, 2)
+        sleep.assert_called_once_with(1)
+
+    @patch("scripts.generate_dialogue_scenarios.time.sleep")
+    def test_generation_retries_transient_service_failure(self, sleep):
+        unavailable = Mock(status_code=503)
+        success = Mock(status_code=200)
+        client = Mock()
+        client.post.side_effect = [unavailable, success]
+
+        response = post_message_with_retry(
+            client, {"session_id": "session", "user_input": "hello"}, max_retries=2
+        )
+
+        self.assertIs(response, success)
+        self.assertEqual(client.post.call_count, 2)
+        sleep.assert_called_once_with(2)
 
     def test_deleted_memory_session_cannot_be_resurrected_by_a_late_save(self):
         store = MemorySessionStore(ttl_seconds=60)
